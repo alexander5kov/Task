@@ -1,72 +1,80 @@
 import requests
-from fastapi import FastAPI, UploadFile, File
+import csv
+from fastapi import FastAPI, UploadFile
 from typing import List
-from pydantic import BaseModel
 
 app = FastAPI()
 
-class Vehicle(BaseModel):
-    rnr: str
-    gruppe: str
-    kurzname: str
-    info: str
-    hu: str
-    labelIds: List[str]
+@app.post('/api/merge')
+async def merge_data(file: UploadFile):
+    csv_data = await file.read()
+    csv_data = csv_data.decode('utf-8').splitlines()
+    csv_reader = csv.reader(csv_data)
+    header = next(csv_reader)  # Extract header row
 
-@app.post("/process_csv")
-def process_csv(csv_file: UploadFile = File(...)):
+    # Request authorization token
+    token = get_auth_token()
 
-    auth_url = "https://api.baubuddy.de/index.php/login"
-    auth_payload = {
-        "username": "365",
-        "password": "1"
-    }
-    auth_headers = {
-        "Authorization": "Basic QVBJX0V4cGxvcmVyOjEyMzQ1NmlzQUxhbWVQYXNz",
-        "Content-Type": "application/json"
-    }
-    auth_response = requests.post(auth_url, json=auth_payload, headers=auth_headers)
-    auth_data = auth_response.json()
-    access_token = auth_data["oauth"]["access_token"]
+    # Download resources from API
+    api_url = 'https://api.baubuddy.de/dev/index.php/v1/vehicles/select/active'
+    api_response = requests.get(api_url, headers={'Authorization': f'Bearer {token}'}).json()
 
+    # Merge resources with CSV data
+    merged_data = merge_csv_and_api_data(csv_reader, api_response)
 
-    csv_content = csv_file.file.read().decode("utf-8")
-    csv_lines = csv_content.split("\n")
+    # Filter out resources without 'hu' field
+    filtered_data = filter_data_by_hu(merged_data)
 
+    # Resolve label color codes
+    resolve_label_colors(filtered_data, token)
 
-    if csv_lines[0].startswith("rnr"):
-        csv_lines = csv_lines[1:]
-
-
-    api_url = "https://api.baubuddy.de/dev/index.php/v1/vehicles/select/active"
-    api_headers = {
-        "Authorization": f"Bearer {access_token}"
-    }
-    api_response = requests.get(api_url, headers=api_headers)
-    api_data = api_response.json()
-
-
-    merged_data = []
-    for line in csv_lines:
-        if not line:
-            continue
-        fields = line.split(";")
-        rnr = fields[0]
-        hu = fields[1]
-        label_ids = fields[2].split(",") if len(fields) > 2 else []
-        vehicle_data = next((item for item in api_data if item["rnr"] == rnr), None)
-        if vehicle_data and hu:
-            vehicle_data["hu"] = hu
-            vehicle_data["labelIds"] = label_ids
-            merged_data.append(vehicle_data)
-
-
-    label_url = "https://api.baubuddy.de/dev/index.php/v1/labels/{labelId}"
-    for item in merged_data:
-        for i, label_id in enumerate(item["labelIds"]):
-            label_response = requests.get(label_url.format(labelId=label_id), headers=api_headers)
-            label_data = label_response.json()
-            color_code = label_data.get("colorCode", "")
-            item["labelIds"][i] = color_code
-
+    # Prepare response with header row and merged data
+    merged_data.insert(0, header)
     return merged_data
+
+def get_auth_token():
+    url = 'https://api.baubuddy.de/index.php/login'
+    payload = {
+        'username': '365',
+        'password': '1'
+    }
+    headers = {
+        'Authorization': 'Basic QVBJX0V4cGxvcmVyOjEyMzQ1NmlzQUxhbWVQYXNz',
+        'Content-Type': 'application/json'
+    }
+    response = requests.request("POST", url, json=payload, headers=headers)
+    access_token = response.json().get('oauth', {}).get('access_token')
+    return access_token
+
+def merge_csv_and_api_data(csv_data, api_data):
+    # Merge CSV data and API response
+    merged_data = {}
+
+    for row in csv_data:
+        rnr = row[0]
+        merged_row = api_data.get(rnr, {})
+        merged_row['rnr'] = rnr
+        merged_data[rnr] = merged_row
+
+    return list(merged_data.values())
+
+def filter_data_by_hu(data):
+    # Filter out resources without 'hu' field
+    return [row for row in data if 'hu' in row]
+
+def resolve_label_colors(data, token):
+    # Resolve label color codes
+    label_api_url = 'https://api.baubuddy.de/dev/index.php/v1/labels/'
+    for row in data:
+        label_ids = row.get('labelIds', [])
+        for label_id in label_ids:
+            label_url = f'{label_api_url}{label_id}'
+            label_response = requests.get(label_url, headers={'Authorization': f'Bearer {token}'}).json()
+            color_code = label_response.get('colorCode')
+            if color_code:
+                row['colorCode'] = color_code
+
+    return data
+
+
+
